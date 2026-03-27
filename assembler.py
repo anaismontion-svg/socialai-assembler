@@ -42,6 +42,17 @@ def get_font(font_name, size):
     try:
         return ImageFont.truetype(path, size)
     except:
+        system_fonts = [
+            '/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf',
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+        ]
+        for f in system_fonts:
+            try:
+                return ImageFont.truetype(f, size)
+            except:
+                continue
         return ImageFont.load_default()
 
 def download_image(url):
@@ -292,54 +303,72 @@ def story_template():
 
         W, H = 1080, 1920
         palette = branding.get('palette', {})
-        primary = hex_to_rgb(palette.get('primary', '#ff3b6b'))
+        primary = hex_to_rgb(palette.get('primary', '#e6bcd0'))
         light   = hex_to_rgb(palette.get('text_light', '#ffffff'))
+        dark    = hex_to_rgb(palette.get('dark', '#7a5c67'))
 
         canvas = Image.new('RGB', (W, H), primary)
         draw   = ImageDraw.Draw(canvas)
 
-        ft = get_font('Lora-Italic', 72)
-        fc = get_font('Poppins-Regular', 40)
-        fs = get_font('Poppins-Light', 34)
+        # Fond avec dégradé subtil
+        for y in range(H):
+            ratio = y / H
+            r = int(primary[0] * (1 - ratio * 0.3))
+            g = int(primary[1] * (1 - ratio * 0.3))
+            b = int(primary[2] * (1 - ratio * 0.3))
+            draw.line([(0, y), (W, y)], fill=(r, g, b))
+
+        draw = ImageDraw.Draw(canvas)
+
+        ft = get_font('Lora-Italic', 80)
+        fc = get_font('Poppins-Regular', 44)
+        fs = get_font('Poppins-Light', 36)
+
+        # Ligne décorative
+        draw.line([(80, 260), (300, 260)], fill=dark, width=3)
 
         if story_type == 'entreprise':
             titre    = content.get('titre', client_name)
             accroche = content.get('sous_titre', '')
             texte    = content.get('texte', '')
-            draw.text((80, 300), titre,    font=ft, fill=light)
-            draw.text((80, 420), accroche, font=fc, fill=light)
+            draw.text((80, 290), titre,    font=ft, fill=dark)
+            draw.text((80, 430), accroche, font=fc, fill=dark)
             lines = wrap_text(texte, fs, W - 160, draw)
-            y = 530
-            for line in lines[:6]:
-                draw.text((80, y), line, font=fs, fill=light)
-                y += 52
+            y = 540
+            for line in lines[:8]:
+                draw.text((80, y), line, font=fs, fill=dark)
+                y += 56
 
         elif story_type == 'tarifs':
             titre    = content.get('titre', 'Nos tarifs')
             services = content.get('services', '').replace('<br>', '\n')
-            draw.text((80, 300), titre, font=ft, fill=light)
+            draw.text((80, 290), titre, font=ft, fill=dark)
             y = 440
             for line in services.split('\n')[:8]:
                 if line.strip():
-                    draw.text((80, y), f"• {line.strip()}", font=fc, fill=light)
-                    y += 70
+                    draw.text((80, y), f"• {line.strip()}", font=fc, fill=dark)
+                    y += 75
 
         elif story_type == 'temoignage':
             texte      = content.get('texte', '')
             nom_client = content.get('nom_client', '')
             note       = content.get('note', 5)
-            draw.text((80, 300), '⭐' * note, font=fc, fill=light)
-            lines = wrap_text(f'"{texte}"', ft, W - 160, draw)
-            y = 420
-            for line in lines[:5]:
-                draw.text((80, y), line, font=ft, fill=light)
-                y += 90
-            draw.text((80, y + 40), f"— {nom_client}", font=fs, fill=light)
+            draw.text((80, 280), '★' * note, font=fc, fill=dark)
+            lines = wrap_text(f'« {texte} »', ft, W - 160, draw)
+            y = 400
+            for line in lines[:6]:
+                draw.text((80, y), line, font=ft, fill=dark)
+                y += 95
+            draw.text((80, y + 40), f"— {nom_client}", font=fs, fill=dark)
 
         elif story_type == 'avant_apres':
             titre = content.get('titre', 'Avant / Après')
-            draw.text((80, 300), titre, font=ft, fill=light)
-            draw.text((80, 450), 'Découvrez la transformation', font=fc, fill=light)
+            draw.text((80, 290), titre, font=ft, fill=dark)
+            draw.text((80, 430), 'Découvrez la transformation', font=fc, fill=dark)
+
+        # Nom du client en bas
+        draw.line([(80, H-120), (300, H-120)], fill=dark, width=2)
+        draw.text((80, H-100), client_name, font=fs, fill=dark)
 
         url = upload_to_supabase(
             canvas,
