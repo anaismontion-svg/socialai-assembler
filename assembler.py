@@ -53,14 +53,12 @@ def load_logo(url, width, style='thick'):
     r = requests.get(url, timeout=15)
     logo = Image.open(BytesIO(r.content)).convert('RGBA')
     arr  = np.array(logo)
-    # Détourer le fond noir
     rc, g, b = arr[:,:,0], arr[:,:,1], arr[:,:,2]
     arr[:,:,3] = np.where((rc < 80) & (g < 80) & (b < 80), 0, arr[:,:,3])
     arr[:,:,0] = np.where(arr[:,:,3]>10, 255, 0)
     arr[:,:,1] = np.where(arr[:,:,3]>10, 255, 0)
     arr[:,:,2] = np.where(arr[:,:,3]>10, 255, 0)
     logo = Image.fromarray(arr, 'RGBA')
-    # Épaisseur du trait
     dilate = {'thick': 6, 'normal': 3, 'thin': 1}.get(style, 3)
     alpha = logo.split()[3]
     for _ in range(dilate):
@@ -84,7 +82,6 @@ def smart_crop(img, target_w, target_h):
         img   = img.crop((left, 0, left + new_w, ph))
     else:
         new_h = int(pw / tgt_ratio)
-        # Portrait → prendre depuis le haut (visage en haut)
         top = 0 if ph > pw else (ph - new_h) // 2
         top = min(top, ph - new_h)
         img = img.crop((0, top, pw, top + new_h))
@@ -160,11 +157,9 @@ def generate_single(photo_url, logo_url, branding, titre, caption):
 
     draw = ImageDraw.Draw(canvas)
 
-    # Cadre fin couleur primaire
     if branding.get('frame_border', True):
         draw.rectangle([(18,18),(W-18,H-18)], outline=primary, width=1)
 
-    # Logo
     logo_pos  = branding.get('logo_position', 'bottom-right')
     logo_size = 185
     logo = load_logo(logo_url, logo_size, branding.get('logo_style','thick'))
@@ -174,16 +169,14 @@ def generate_single(photo_url, logo_url, branding, titre, caption):
         lx, ly = 40, H - logo.height - 40
     elif logo_pos == 'top-right':
         lx, ly = W - logo.width - 40, 40
-    else:  # top-left
+    else:
         lx, ly = 36, 32
     canvas = paste_layer(canvas, logo, lx, ly)
     draw = ImageDraw.Draw(canvas)
 
-    # Fonts
     ft = get_font(branding['fonts']['titre'], 56)
     fc = get_font(branding['fonts']['corps'], 29)
 
-    # Texte — remonter depuis le bas
     caption2_y = H - 82
     caption1_y = caption2_y - 46
     sep_y      = caption1_y - 28
@@ -192,7 +185,6 @@ def generate_single(photo_url, logo_url, branding, titre, caption):
     draw.text((56, titre_y), titre, font=ft, fill=primary)
     draw.line([(56, sep_y),(200, sep_y)], fill=primary, width=1)
 
-    # Caption sur 2 lignes max
     lines = wrap_text(caption, fc, W - 120, draw)
     for i, line in enumerate(lines[:2]):
         draw.text((56, caption1_y + i * 44), line, font=fc,
@@ -213,14 +205,11 @@ def generate_story(photo_url, logo_url, branding, titre, caption, tagline):
     photo  = download_image(photo_url)
     canvas = smart_crop(photo, W, H)
 
-    # Dégradé couleur primaire en haut
     if branding.get('gradient_top', True):
         canvas = add_gradient_top(canvas, 0.38, 115, primary)
 
-    # Dégradé noir en bas
     canvas = add_gradient(canvas, 0.56, 220)
 
-    # Logo en haut à gauche
     logo = load_logo(logo_url, 320, branding.get('logo_style','thick'))
     canvas = paste_layer(canvas, logo, 36, 32)
 
@@ -230,8 +219,7 @@ def generate_story(photo_url, logo_url, branding, titre, caption, tagline):
     fg = get_font(branding['fonts']['corps'], 27)
 
     draw.line([(80, H-372),(260, H-372)], fill=(255,255,255), width=1)
-    draw.text((80, H-354), titre,                    font=ft, fill=primary)
-    draw.text((80, H-272), caption,                  font=fc, fill=light)
+    draw.text((80, H-354), titre, font=ft, fill=primary)
     lines = wrap_text(caption, fc, W - 160, draw)
     y = H - 272
     for line in lines[:2]:
@@ -262,13 +250,11 @@ def generate_carousel_slide(photo_url, logo_url, branding, titre, caption,
     if branding.get('frame_border', True):
         draw.rectangle([(18,18),(W-18,H-18)], outline=primary, width=1)
 
-    # Numéro de slide
     fn = get_font(branding['fonts']['corps'], 22)
     draw.rounded_rectangle([(36,36),(130,70)], radius=14, fill=(13,13,13,170))
     draw.text((83, 53), f"{slide_num} / {total_slides}",
               font=fn, fill=primary, anchor='mm')
 
-    # Logo
     logo = load_logo(logo_url, 185, branding.get('logo_style','thick'))
     canvas = paste_layer(canvas, logo, W - logo.width - 40, H - logo.height - 40)
     draw = ImageDraw.Draw(canvas)
@@ -292,6 +278,81 @@ def generate_carousel_slide(photo_url, logo_url, branding, titre, caption,
     return canvas
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ENDPOINT STORY TEMPLATES FIXES
+# ─────────────────────────────────────────────────────────────────────────────
+@app.route('/story', methods=['POST'])
+def story_template():
+    try:
+        data        = request.json
+        client_id   = data['client_id']
+        story_type  = data['story_type']
+        content     = data.get('content', {})
+        branding    = data.get('branding', {})
+        client_name = data.get('client_name', '')
+
+        W, H = 1080, 1920
+        palette = branding.get('palette', {})
+        primary = hex_to_rgb(palette.get('primary', '#ff3b6b'))
+        light   = hex_to_rgb(palette.get('text_light', '#ffffff'))
+
+        canvas = Image.new('RGB', (W, H), primary)
+        draw   = ImageDraw.Draw(canvas)
+
+        ft = get_font('Lora-Italic', 72)
+        fc = get_font('Poppins-Regular', 40)
+        fs = get_font('Poppins-Light', 34)
+
+        if story_type == 'entreprise':
+            titre    = content.get('titre', client_name)
+            accroche = content.get('sous_titre', '')
+            texte    = content.get('texte', '')
+            draw.text((80, 300), titre,    font=ft, fill=light)
+            draw.text((80, 420), accroche, font=fc, fill=light)
+            lines = wrap_text(texte, fs, W - 160, draw)
+            y = 530
+            for line in lines[:6]:
+                draw.text((80, y), line, font=fs, fill=light)
+                y += 52
+
+        elif story_type == 'tarifs':
+            titre    = content.get('titre', 'Nos tarifs')
+            services = content.get('services', '').replace('<br>', '\n')
+            draw.text((80, 300), titre, font=ft, fill=light)
+            y = 440
+            for line in services.split('\n')[:8]:
+                if line.strip():
+                    draw.text((80, y), f"• {line.strip()}", font=fc, fill=light)
+                    y += 70
+
+        elif story_type == 'temoignage':
+            texte      = content.get('texte', '')
+            nom_client = content.get('nom_client', '')
+            note       = content.get('note', 5)
+            draw.text((80, 300), '⭐' * note, font=fc, fill=light)
+            lines = wrap_text(f'"{texte}"', ft, W - 160, draw)
+            y = 420
+            for line in lines[:5]:
+                draw.text((80, y), line, font=ft, fill=light)
+                y += 90
+            draw.text((80, y + 40), f"— {nom_client}", font=fs, fill=light)
+
+        elif story_type == 'avant_apres':
+            titre = content.get('titre', 'Avant / Après')
+            draw.text((80, 300), titre, font=ft, fill=light)
+            draw.text((80, 450), 'Découvrez la transformation', font=fc, fill=light)
+
+        url = upload_to_supabase(
+            canvas,
+            f"story_template_{story_type}_{int(__import__('time').time())}.jpg",
+            client_id
+        )
+        return jsonify({ 'success': True, 'url': url })
+
+    except Exception as e:
+        print(f"❌ Erreur story template: {e}")
+        return jsonify({ 'success': False, 'error': str(e) }), 500
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ENDPOINT PRINCIPAL — POST /assemble
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route('/assemble', methods=['POST'])
@@ -299,10 +360,10 @@ def assemble():
     try:
         data        = request.json
         client_id   = data['client_id']
-        format_type = data['format']      # 'single' | 'story' | 'carousel'
-        photo_urls  = data['photo_urls']  # liste d'URLs
+        format_type = data['format']
+        photo_urls  = data['photo_urls']
         logo_url    = data['logo_url']
-        branding    = data['branding']    # JSON complet du branding client
+        branding    = data['branding']
         titre       = data['titre']
         caption     = data['caption']
         tagline     = data.get('tagline', branding.get('tagline', ''))
@@ -322,7 +383,6 @@ def assemble():
         elif format_type == 'carousel':
             total = len(photo_urls)
             for i, photo_url in enumerate(photo_urls):
-                # Titre différent par slide — l'IA peut en envoyer plusieurs
                 slide_titre = data.get('titres', [titre] * total)[i]
                 slide_cap   = data.get('captions', [caption] * total)[i]
                 img = generate_carousel_slide(
