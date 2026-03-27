@@ -1,0 +1,7 @@
+flask
+pillow
+numpy
+requests
+supabase
+gunicorn
+boto3
