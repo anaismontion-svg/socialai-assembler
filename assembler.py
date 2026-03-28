@@ -6,17 +6,19 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 import numpy as np
 import requests
 import os
-import boto3
+import base64
+import anthropic
 from io import BytesIO
 from supabase import create_client
 
 app = Flask(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-SUPABASE_URL  = os.environ.get('SUPABASE_URL')
-SUPABASE_KEY  = os.environ.get('SUPABASE_SERVICE_KEY')
-FONT_BASE     = '/app/fonts/'
-DEFAULT_FONTS = {
+SUPABASE_URL      = os.environ.get('SUPABASE_URL')
+SUPABASE_KEY      = os.environ.get('SUPABASE_SERVICE_KEY')
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
+FONT_BASE         = '/app/fonts/'
+DEFAULT_FONTS     = {
     'Lora-Italic':    'Lora-Italic-Variable.ttf',
     'Lora-Regular':   'Lora-Variable.ttf',
     'Poppins-Light':  'Poppins-Light.ttf',
@@ -24,7 +26,54 @@ DEFAULT_FONTS = {
     'Poppins-Medium': 'Poppins-Medium.ttf',
 }
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase      = create_client(SUPABASE_URL, SUPABASE_KEY)
+claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DÉTECTION SUJET VIA CLAUDE VISION
+# ─────────────────────────────────────────────────────────────────────────────
+def detect_subject_position(img):
+    """Envoie l'image à Claude pour détecter où se trouve le sujet principal.
+    Retourne : 'top', 'center', ou 'bottom'
+    """
+    try:
+        thumb = img.copy()
+        thumb.thumbnail((512, 512))
+        buf = BytesIO()
+        thumb.save(buf, format='JPEG', quality=70)
+        img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+
+        message = claude_client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=50,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": img_b64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": "Where is the main subject (person, animal, face, or object) located in this image? Reply with ONLY one word: 'top', 'center', or 'bottom'."
+                    }
+                ],
+            }]
+        )
+
+        position = message.content[0].text.strip().lower()
+        if position not in ['top', 'center', 'bottom']:
+            position = 'top'
+        print(f"🎯 Sujet détecté : {position}")
+        return position
+
+    except Exception as e:
+        print(f"⚠️ Erreur détection sujet: {e} — fallback top")
+        return 'top'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UTILITAIRES
@@ -116,9 +165,25 @@ def add_gradient_top(img, end_pct, max_alpha, color):
     return Image.alpha_composite(img.convert('RGBA'), ov).convert('RGB')
 
 def add_overlay(img, color, alpha=160):
-    """Ajoute un overlay de couleur semi-transparent sur toute l'image"""
     W, H = img.size
     ov = Image.new('RGBA', (W, H), (*color, alpha))
+    return Image.alpha_composite(img.convert('RGBA'), ov).convert('RGB')
+
+def add_gradient_zone(img, zone, max_alpha=220):
+    """Dégradé sombre uniquement dans la zone du texte."""
+    W, H = img.size
+    ov = Image.new('RGBA', (W, H), (0,0,0,0))
+    d  = ImageDraw.Draw(ov)
+    if zone == 'bottom':
+        start = int(H * 0.45)
+        for y in range(start, H):
+            a = int(max_alpha * (y - start) / (H - start))
+            d.line([(0,y),(W,y)], fill=(10,10,10,a))
+    else:
+        end = int(H * 0.55)
+        for y in range(end):
+            a = int(max_alpha * (1 - y / end))
+            d.line([(0,y),(W,y)], fill=(10,10,10,a))
     return Image.alpha_composite(img.convert('RGBA'), ov).convert('RGB')
 
 def paste_layer(canvas, layer, x, y):
@@ -155,142 +220,80 @@ def wrap_text(text, font, max_width, draw):
         lines.append(current)
     return lines
 
+def _make_color_canvas(W, H, primary):
+    canvas = Image.new('RGB', (W, H), primary)
+    draw   = ImageDraw.Draw(canvas)
+    for y in range(H):
+        ratio = y / H
+        r = int(primary[0] * (1 - ratio * 0.3))
+        g = int(primary[1] * (1 - ratio * 0.3))
+        b = int(primary[2] * (1 - ratio * 0.3))
+        draw.line([(0, y), (W, y)], fill=(r, g, b))
+    return canvas
+
 # ─────────────────────────────────────────────────────────────────────────────
-# FORMAT 1 — SINGLE POST 1080×1080
+# DESSIN DU TEXTE — adaptatif selon zone
 # ─────────────────────────────────────────────────────────────────────────────
-def generate_single(photo_url, logo_url, branding, titre, caption):
-    W, H = 1080, 1080
-    palette = branding['palette']
-    primary = hex_to_rgb(palette['primary'])
-    light   = hex_to_rgb(palette.get('text_light', '#ffffff'))
-    taupe   = hex_to_rgb(palette.get('secondary', '#c4aecf'))
+def draw_story_text(draw, story_type, content, client_name,
+                    text_color, line_color, ft, fc, fs, W, H, text_zone):
 
-    photo  = download_image(photo_url)
-    photo  = ImageEnhance.Color(photo).enhance(0.88)
-    canvas = smart_crop(photo, W, H)
-    canvas = add_gradient(canvas, 0.46, 215)
-
-    draw = ImageDraw.Draw(canvas)
-
-    if branding.get('frame_border', True):
-        draw.rectangle([(18,18),(W-18,H-18)], outline=primary, width=1)
-
-    logo_pos  = branding.get('logo_position', 'bottom-right')
-    logo_size = 185
-    logo = load_logo(logo_url, logo_size, branding.get('logo_style','thick'))
-    if logo_pos == 'bottom-right':
-        lx, ly = W - logo.width - 40, H - logo.height - 40
-    elif logo_pos == 'bottom-left':
-        lx, ly = 40, H - logo.height - 40
-    elif logo_pos == 'top-right':
-        lx, ly = W - logo.width - 40, 40
+    if text_zone == 'bottom':
+        base_y      = H - 680
+        line_y      = base_y - 30
+        name_y      = H - 95
+        name_line_y = H - 125
     else:
-        lx, ly = 36, 32
-    canvas = paste_layer(canvas, logo, lx, ly)
-    draw = ImageDraw.Draw(canvas)
+        base_y      = 290
+        line_y      = 255
+        name_y      = H - 95
+        name_line_y = H - 125
 
-    ft = get_font(branding['fonts']['titre'], 56)
-    fc = get_font(branding['fonts']['corps'], 29)
+    # Ligne décorative principale
+    draw.line([(80, line_y), (300, line_y)], fill=line_color, width=3)
 
-    caption2_y = H - 82
-    caption1_y = caption2_y - 46
-    sep_y      = caption1_y - 28
-    titre_y    = sep_y - 72
+    if story_type == 'entreprise':
+        titre    = content.get('titre', client_name)
+        accroche = content.get('sous_titre', '')
+        texte    = content.get('texte', '')
+        draw.text((80, base_y),       titre,    font=ft, fill=text_color)
+        draw.text((80, base_y + 130), accroche, font=fc, fill=text_color)
+        lines = wrap_text(texte, fs, W - 160, draw)
+        y = base_y + 220
+        for line in lines[:5]:
+            draw.text((80, y), line, font=fs, fill=text_color)
+            y += 56
 
-    draw.text((56, titre_y), titre, font=ft, fill=primary)
-    draw.line([(56, sep_y),(200, sep_y)], fill=primary, width=1)
+    elif story_type == 'tarifs':
+        titre    = content.get('titre', 'Nos tarifs')
+        services = content.get('services', '').replace('<br>', '\n')
+        draw.text((80, base_y), titre, font=ft, fill=text_color)
+        y = base_y + 130
+        for line in services.split('\n')[:6]:
+            if line.strip():
+                draw.text((80, y), f"• {line.strip()}", font=fc, fill=text_color)
+                y += 70
 
-    lines = wrap_text(caption, fc, W - 120, draw)
-    for i, line in enumerate(lines[:2]):
-        draw.text((56, caption1_y + i * 44), line, font=fc,
-                  fill=light if i == 0 else taupe)
+    elif story_type == 'temoignage':
+        texte      = content.get('texte', '')
+        nom_client = content.get('nom_client', '')
+        note       = content.get('note', 5)
+        draw.text((80, line_y - 10), '★' * note, font=fc, fill=text_color)
+        lines = wrap_text(f'« {texte} »', ft, W - 160, draw)
+        y = base_y
+        for line in lines[:4]:
+            draw.text((80, y), line, font=ft, fill=text_color)
+            y += 90
+        draw.text((80, y + 20), f"— {nom_client}", font=fs, fill=text_color)
 
-    return canvas
+    elif story_type == 'avant_apres':
+        titre = content.get('titre', 'Avant / Après')
+        draw.text((80, base_y),       titre,                         font=ft, fill=text_color)
+        draw.text((80, base_y + 130), 'Découvrez la transformation', font=fc, fill=text_color)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FORMAT 2 — STORY 1080×1920
-# ─────────────────────────────────────────────────────────────────────────────
-def generate_story(photo_url, logo_url, branding, titre, caption, tagline):
-    W, H = 1080, 1920
-    palette = branding['palette']
-    primary = hex_to_rgb(palette['primary'])
-    light   = hex_to_rgb(palette.get('text_light', '#ffffff'))
-    muted   = tuple(min(255, c + 30) for c in light)
+    # Nom du client en bas
+    draw.line([(80, name_line_y), (300, name_line_y)], fill=line_color, width=2)
+    draw.text((80, name_y), client_name, font=fs, fill=text_color)
 
-    photo  = download_image(photo_url)
-    canvas = smart_crop(photo, W, H)
-
-    if branding.get('gradient_top', True):
-        canvas = add_gradient_top(canvas, 0.38, 115, primary)
-
-    canvas = add_gradient(canvas, 0.56, 220)
-
-    logo = load_logo(logo_url, 320, branding.get('logo_style','thick'))
-    canvas = paste_layer(canvas, logo, 36, 32)
-
-    draw = ImageDraw.Draw(canvas)
-    ft = get_font(branding['fonts']['titre'], 66)
-    fc = get_font(branding['fonts']['corps'], 34)
-    fg = get_font(branding['fonts']['corps'], 27)
-
-    draw.line([(80, H-372),(260, H-372)], fill=(255,255,255), width=1)
-    draw.text((80, H-354), titre, font=ft, fill=primary)
-    lines = wrap_text(caption, fc, W - 160, draw)
-    y = H - 272
-    for line in lines[:2]:
-        draw.text((80, y), line, font=fc, fill=light)
-        y += 52
-    draw.text((80, H-160), tagline, font=fg, fill=muted)
-
-    return canvas
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FORMAT 3 — CAROUSEL SLIDE 1080×1080
-# ─────────────────────────────────────────────────────────────────────────────
-def generate_carousel_slide(photo_url, logo_url, branding, titre, caption,
-                             slide_num, total_slides):
-    W, H = 1080, 1080
-    palette = branding['palette']
-    primary = hex_to_rgb(palette['primary'])
-    light   = hex_to_rgb(palette.get('text_light', '#ffffff'))
-    taupe   = hex_to_rgb(palette.get('secondary', '#c4aecf'))
-
-    photo  = download_image(photo_url)
-    photo  = ImageEnhance.Color(photo).enhance(0.88)
-    canvas = smart_crop(photo, W, H)
-    canvas = add_gradient(canvas, 0.48, 205)
-
-    draw = ImageDraw.Draw(canvas)
-
-    if branding.get('frame_border', True):
-        draw.rectangle([(18,18),(W-18,H-18)], outline=primary, width=1)
-
-    fn = get_font(branding['fonts']['corps'], 22)
-    draw.rounded_rectangle([(36,36),(130,70)], radius=14, fill=(13,13,13,170))
-    draw.text((83, 53), f"{slide_num} / {total_slides}",
-              font=fn, fill=primary, anchor='mm')
-
-    logo = load_logo(logo_url, 185, branding.get('logo_style','thick'))
-    canvas = paste_layer(canvas, logo, W - logo.width - 40, H - logo.height - 40)
-    draw = ImageDraw.Draw(canvas)
-
-    ft = get_font(branding['fonts']['titre'], 52)
-    fc = get_font(branding['fonts']['corps'], 30)
-
-    caption2_y = H - 82
-    caption1_y = caption2_y - 46
-    sep_y      = caption1_y - 28
-    titre_y    = sep_y - 66
-
-    draw.text((56, titre_y), titre, font=ft, fill=primary)
-    draw.line([(56, sep_y),(200, sep_y)], fill=primary, width=1)
-
-    lines = wrap_text(caption, fc, W - 120, draw)
-    for i, line in enumerate(lines[:2]):
-        draw.text((56, caption1_y + i * 44), line, font=fc,
-                  fill=light if i == 0 else taupe)
-
-    return canvas
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENDPOINT STORY TEMPLATES FIXES
@@ -313,80 +316,52 @@ def story_template():
 
         photo_url = content.get('photo_url', '')
 
-        # ── Fond : photo ou couleur ───────────────────────────────────────────
         if photo_url:
             try:
-                photo  = download_image(photo_url)
+                photo = download_image(photo_url)
+
+                # 🎯 Détecter position du sujet
+                subject_position = detect_subject_position(photo)
+
+                # Texte à l'opposé du sujet
+                if subject_position == 'bottom':
+                    text_zone = 'top'
+                elif subject_position == 'top':
+                    text_zone = 'bottom'
+                else:
+                    text_zone = 'bottom'  # centre → texte en bas
+
+                print(f"📝 Zone texte : {text_zone} (sujet : {subject_position})")
+
                 canvas = smart_crop(photo, W, H)
-                # Assombrir légèrement la photo pour que le texte soit lisible
-                canvas = ImageEnhance.Brightness(canvas).enhance(0.65)
-                # Overlay de couleur semi-transparent
-                canvas = add_overlay(canvas, primary, alpha=80)
-                # Dégradé sombre en bas pour le texte
-                canvas = add_gradient(canvas, 0.5, 200, (10, 10, 10))
+                canvas = ImageEnhance.Brightness(canvas).enhance(0.72)
+                canvas = add_overlay(canvas, primary, alpha=55)
+                canvas = add_gradient_zone(canvas, text_zone, max_alpha=210)
+
                 text_color = light
                 line_color = light
+
             except Exception as e:
-                print(f"⚠️ Erreur chargement photo: {e} — fallback couleur")
-                canvas = _make_color_canvas(W, H, primary)
+                print(f"⚠️ Erreur photo: {e} — fallback couleur")
+                canvas     = _make_color_canvas(W, H, primary)
                 text_color = dark
                 line_color = dark
+                text_zone  = 'top'
         else:
-            canvas = _make_color_canvas(W, H, primary)
+            canvas     = _make_color_canvas(W, H, primary)
             text_color = dark
             line_color = dark
+            text_zone  = 'top'
 
         draw = ImageDraw.Draw(canvas)
-
         ft = get_font('Lora-Italic', 80)
         fc = get_font('Poppins-Regular', 44)
         fs = get_font('Poppins-Light', 36)
 
-        # Ligne décorative
-        draw.line([(80, 260), (300, 260)], fill=line_color, width=3)
-
-        if story_type == 'entreprise':
-            titre    = content.get('titre', client_name)
-            accroche = content.get('sous_titre', '')
-            texte    = content.get('texte', '')
-            draw.text((80, 290), titre,    font=ft, fill=text_color)
-            draw.text((80, 430), accroche, font=fc, fill=text_color)
-            lines = wrap_text(texte, fs, W - 160, draw)
-            y = 540
-            for line in lines[:8]:
-                draw.text((80, y), line, font=fs, fill=text_color)
-                y += 56
-
-        elif story_type == 'tarifs':
-            titre    = content.get('titre', 'Nos tarifs')
-            services = content.get('services', '').replace('<br>', '\n')
-            draw.text((80, 290), titre, font=ft, fill=text_color)
-            y = 440
-            for line in services.split('\n')[:8]:
-                if line.strip():
-                    draw.text((80, y), f"• {line.strip()}", font=fc, fill=text_color)
-                    y += 75
-
-        elif story_type == 'temoignage':
-            texte      = content.get('texte', '')
-            nom_client = content.get('nom_client', '')
-            note       = content.get('note', 5)
-            draw.text((80, 280), '★' * note, font=fc, fill=text_color)
-            lines = wrap_text(f'« {texte} »', ft, W - 160, draw)
-            y = 400
-            for line in lines[:6]:
-                draw.text((80, y), line, font=ft, fill=text_color)
-                y += 95
-            draw.text((80, y + 40), f"— {nom_client}", font=fs, fill=text_color)
-
-        elif story_type == 'avant_apres':
-            titre = content.get('titre', 'Avant / Après')
-            draw.text((80, 290), titre, font=ft, fill=text_color)
-            draw.text((80, 430), 'Découvrez la transformation', font=fc, fill=text_color)
-
-        # Nom du client en bas
-        draw.line([(80, H-120), (300, H-120)], fill=line_color, width=2)
-        draw.text((80, H-100), client_name, font=fs, fill=text_color)
+        draw_story_text(
+            draw, story_type, content, client_name,
+            text_color, line_color, ft, fc, fs, W, H, text_zone
+        )
 
         url = upload_to_supabase(
             canvas,
@@ -398,19 +373,6 @@ def story_template():
     except Exception as e:
         print(f"❌ Erreur story template: {e}")
         return jsonify({ 'success': False, 'error': str(e) }), 500
-
-
-def _make_color_canvas(W, H, primary):
-    """Crée un canvas avec fond dégradé de couleur"""
-    canvas = Image.new('RGB', (W, H), primary)
-    draw   = ImageDraw.Draw(canvas)
-    for y in range(H):
-        ratio = y / H
-        r = int(primary[0] * (1 - ratio * 0.3))
-        g = int(primary[1] * (1 - ratio * 0.3))
-        b = int(primary[2] * (1 - ratio * 0.3))
-        draw.line([(0, y), (W, y)], fill=(r, g, b))
-    return canvas
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -463,6 +425,135 @@ def assemble():
     except Exception as e:
         print(f"❌ Erreur assembleur: {e}")
         return jsonify({ 'success': False, 'error': str(e) }), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FORMAT 1 — SINGLE POST 1080×1080
+# ─────────────────────────────────────────────────────────────────────────────
+def generate_single(photo_url, logo_url, branding, titre, caption):
+    W, H = 1080, 1080
+    palette = branding['palette']
+    primary = hex_to_rgb(palette['primary'])
+    light   = hex_to_rgb(palette.get('text_light', '#ffffff'))
+    taupe   = hex_to_rgb(palette.get('secondary', '#c4aecf'))
+
+    photo  = download_image(photo_url)
+    photo  = ImageEnhance.Color(photo).enhance(0.88)
+    canvas = smart_crop(photo, W, H)
+    canvas = add_gradient(canvas, 0.46, 215)
+    draw   = ImageDraw.Draw(canvas)
+
+    if branding.get('frame_border', True):
+        draw.rectangle([(18,18),(W-18,H-18)], outline=primary, width=1)
+
+    logo_pos  = branding.get('logo_position', 'bottom-right')
+    logo_size = 185
+    logo = load_logo(logo_url, logo_size, branding.get('logo_style','thick'))
+    if logo_pos == 'bottom-right':
+        lx, ly = W - logo.width - 40, H - logo.height - 40
+    elif logo_pos == 'bottom-left':
+        lx, ly = 40, H - logo.height - 40
+    elif logo_pos == 'top-right':
+        lx, ly = W - logo.width - 40, 40
+    else:
+        lx, ly = 36, 32
+    canvas = paste_layer(canvas, logo, lx, ly)
+    draw   = ImageDraw.Draw(canvas)
+
+    ft = get_font(branding['fonts']['titre'], 56)
+    fc = get_font(branding['fonts']['corps'], 29)
+
+    caption2_y = H - 82
+    caption1_y = caption2_y - 46
+    sep_y      = caption1_y - 28
+    titre_y    = sep_y - 72
+
+    draw.text((56, titre_y), titre, font=ft, fill=primary)
+    draw.line([(56, sep_y),(200, sep_y)], fill=primary, width=1)
+    lines = wrap_text(caption, fc, W - 120, draw)
+    for i, line in enumerate(lines[:2]):
+        draw.text((56, caption1_y + i * 44), line, font=fc,
+                  fill=light if i == 0 else taupe)
+    return canvas
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FORMAT 2 — STORY 1080×1920
+# ─────────────────────────────────────────────────────────────────────────────
+def generate_story(photo_url, logo_url, branding, titre, caption, tagline):
+    W, H = 1080, 1920
+    palette = branding['palette']
+    primary = hex_to_rgb(palette['primary'])
+    light   = hex_to_rgb(palette.get('text_light', '#ffffff'))
+    muted   = tuple(min(255, c + 30) for c in light)
+
+    photo  = download_image(photo_url)
+    canvas = smart_crop(photo, W, H)
+    if branding.get('gradient_top', True):
+        canvas = add_gradient_top(canvas, 0.38, 115, primary)
+    canvas = add_gradient(canvas, 0.56, 220)
+    logo   = load_logo(logo_url, 320, branding.get('logo_style','thick'))
+    canvas = paste_layer(canvas, logo, 36, 32)
+    draw   = ImageDraw.Draw(canvas)
+
+    ft = get_font(branding['fonts']['titre'], 66)
+    fc = get_font(branding['fonts']['corps'], 34)
+    fg = get_font(branding['fonts']['corps'], 27)
+
+    draw.line([(80, H-372),(260, H-372)], fill=(255,255,255), width=1)
+    draw.text((80, H-354), titre, font=ft, fill=primary)
+    lines = wrap_text(caption, fc, W - 160, draw)
+    y = H - 272
+    for line in lines[:2]:
+        draw.text((80, y), line, font=fc, fill=light)
+        y += 52
+    draw.text((80, H-160), tagline, font=fg, fill=muted)
+    return canvas
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FORMAT 3 — CAROUSEL SLIDE 1080×1080
+# ─────────────────────────────────────────────────────────────────────────────
+def generate_carousel_slide(photo_url, logo_url, branding, titre, caption,
+                             slide_num, total_slides):
+    W, H = 1080, 1080
+    palette = branding['palette']
+    primary = hex_to_rgb(palette['primary'])
+    light   = hex_to_rgb(palette.get('text_light', '#ffffff'))
+    taupe   = hex_to_rgb(palette.get('secondary', '#c4aecf'))
+
+    photo  = download_image(photo_url)
+    photo  = ImageEnhance.Color(photo).enhance(0.88)
+    canvas = smart_crop(photo, W, H)
+    canvas = add_gradient(canvas, 0.48, 205)
+    draw   = ImageDraw.Draw(canvas)
+
+    if branding.get('frame_border', True):
+        draw.rectangle([(18,18),(W-18,H-18)], outline=primary, width=1)
+
+    fn = get_font(branding['fonts']['corps'], 22)
+    draw.rounded_rectangle([(36,36),(130,70)], radius=14, fill=(13,13,13,170))
+    draw.text((83, 53), f"{slide_num} / {total_slides}", font=fn, fill=primary, anchor='mm')
+
+    logo   = load_logo(logo_url, 185, branding.get('logo_style','thick'))
+    canvas = paste_layer(canvas, logo, W - logo.width - 40, H - logo.height - 40)
+    draw   = ImageDraw.Draw(canvas)
+
+    ft = get_font(branding['fonts']['titre'], 52)
+    fc = get_font(branding['fonts']['corps'], 30)
+
+    caption2_y = H - 82
+    caption1_y = caption2_y - 46
+    sep_y      = caption1_y - 28
+    titre_y    = sep_y - 66
+
+    draw.text((56, titre_y), titre, font=ft, fill=primary)
+    draw.line([(56, sep_y),(200, sep_y)], fill=primary, width=1)
+    lines = wrap_text(caption, fc, W - 120, draw)
+    for i, line in enumerate(lines[:2]):
+        draw.text((56, caption1_y + i * 44), line, font=fc,
+                  fill=light if i == 0 else taupe)
+    return canvas
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
