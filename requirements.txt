@@ -5,3 +5,4 @@ requests
 supabase
 gunicorn
 boto3
+anthropic
