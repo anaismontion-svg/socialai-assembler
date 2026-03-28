@@ -5,9 +5,7 @@ from flask import Flask, request, jsonify
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 import numpy as np
 import requests
-import tempfile
 import os
-import json
 import boto3
 from io import BytesIO
 from supabase import create_client
@@ -15,10 +13,10 @@ from supabase import create_client
 app = Flask(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-SUPABASE_URL     = os.environ.get('SUPABASE_URL')
-SUPABASE_KEY     = os.environ.get('SUPABASE_SERVICE_KEY')
-FONT_BASE        = '/app/fonts/'
-DEFAULT_FONTS    = {
+SUPABASE_URL  = os.environ.get('SUPABASE_URL')
+SUPABASE_KEY  = os.environ.get('SUPABASE_SERVICE_KEY')
+FONT_BASE     = '/app/fonts/'
+DEFAULT_FONTS = {
     'Lora-Italic':    'Lora-Italic-Variable.ttf',
     'Lora-Regular':   'Lora-Variable.ttf',
     'Poppins-Light':  'Poppins-Light.ttf',
@@ -115,6 +113,12 @@ def add_gradient_top(img, end_pct, max_alpha, color):
     for y in range(fade_zone):
         a = int(max_alpha * (1 - y / fade_zone) ** 2.2)
         d.line([(0,y),(W,y)], fill=(*color, a))
+    return Image.alpha_composite(img.convert('RGBA'), ov).convert('RGB')
+
+def add_overlay(img, color, alpha=160):
+    """Ajoute un overlay de couleur semi-transparent sur toute l'image"""
+    W, H = img.size
+    ov = Image.new('RGBA', (W, H), (*color, alpha))
     return Image.alpha_composite(img.convert('RGBA'), ov).convert('RGB')
 
 def paste_layer(canvas, layer, x, y):
@@ -307,16 +311,30 @@ def story_template():
         light   = hex_to_rgb(palette.get('text_light', '#ffffff'))
         dark    = hex_to_rgb(palette.get('dark', '#7a5c67'))
 
-        canvas = Image.new('RGB', (W, H), primary)
-        draw   = ImageDraw.Draw(canvas)
+        photo_url = content.get('photo_url', '')
 
-        # Fond avec dégradé subtil
-        for y in range(H):
-            ratio = y / H
-            r = int(primary[0] * (1 - ratio * 0.3))
-            g = int(primary[1] * (1 - ratio * 0.3))
-            b = int(primary[2] * (1 - ratio * 0.3))
-            draw.line([(0, y), (W, y)], fill=(r, g, b))
+        # ── Fond : photo ou couleur ───────────────────────────────────────────
+        if photo_url:
+            try:
+                photo  = download_image(photo_url)
+                canvas = smart_crop(photo, W, H)
+                # Assombrir légèrement la photo pour que le texte soit lisible
+                canvas = ImageEnhance.Brightness(canvas).enhance(0.65)
+                # Overlay de couleur semi-transparent
+                canvas = add_overlay(canvas, primary, alpha=80)
+                # Dégradé sombre en bas pour le texte
+                canvas = add_gradient(canvas, 0.5, 200, (10, 10, 10))
+                text_color = light
+                line_color = light
+            except Exception as e:
+                print(f"⚠️ Erreur chargement photo: {e} — fallback couleur")
+                canvas = _make_color_canvas(W, H, primary)
+                text_color = dark
+                line_color = dark
+        else:
+            canvas = _make_color_canvas(W, H, primary)
+            text_color = dark
+            line_color = dark
 
         draw = ImageDraw.Draw(canvas)
 
@@ -325,50 +343,50 @@ def story_template():
         fs = get_font('Poppins-Light', 36)
 
         # Ligne décorative
-        draw.line([(80, 260), (300, 260)], fill=dark, width=3)
+        draw.line([(80, 260), (300, 260)], fill=line_color, width=3)
 
         if story_type == 'entreprise':
             titre    = content.get('titre', client_name)
             accroche = content.get('sous_titre', '')
             texte    = content.get('texte', '')
-            draw.text((80, 290), titre,    font=ft, fill=dark)
-            draw.text((80, 430), accroche, font=fc, fill=dark)
+            draw.text((80, 290), titre,    font=ft, fill=text_color)
+            draw.text((80, 430), accroche, font=fc, fill=text_color)
             lines = wrap_text(texte, fs, W - 160, draw)
             y = 540
             for line in lines[:8]:
-                draw.text((80, y), line, font=fs, fill=dark)
+                draw.text((80, y), line, font=fs, fill=text_color)
                 y += 56
 
         elif story_type == 'tarifs':
             titre    = content.get('titre', 'Nos tarifs')
             services = content.get('services', '').replace('<br>', '\n')
-            draw.text((80, 290), titre, font=ft, fill=dark)
+            draw.text((80, 290), titre, font=ft, fill=text_color)
             y = 440
             for line in services.split('\n')[:8]:
                 if line.strip():
-                    draw.text((80, y), f"• {line.strip()}", font=fc, fill=dark)
+                    draw.text((80, y), f"• {line.strip()}", font=fc, fill=text_color)
                     y += 75
 
         elif story_type == 'temoignage':
             texte      = content.get('texte', '')
             nom_client = content.get('nom_client', '')
             note       = content.get('note', 5)
-            draw.text((80, 280), '★' * note, font=fc, fill=dark)
+            draw.text((80, 280), '★' * note, font=fc, fill=text_color)
             lines = wrap_text(f'« {texte} »', ft, W - 160, draw)
             y = 400
             for line in lines[:6]:
-                draw.text((80, y), line, font=ft, fill=dark)
+                draw.text((80, y), line, font=ft, fill=text_color)
                 y += 95
-            draw.text((80, y + 40), f"— {nom_client}", font=fs, fill=dark)
+            draw.text((80, y + 40), f"— {nom_client}", font=fs, fill=text_color)
 
         elif story_type == 'avant_apres':
             titre = content.get('titre', 'Avant / Après')
-            draw.text((80, 290), titre, font=ft, fill=dark)
-            draw.text((80, 430), 'Découvrez la transformation', font=fc, fill=dark)
+            draw.text((80, 290), titre, font=ft, fill=text_color)
+            draw.text((80, 430), 'Découvrez la transformation', font=fc, fill=text_color)
 
         # Nom du client en bas
-        draw.line([(80, H-120), (300, H-120)], fill=dark, width=2)
-        draw.text((80, H-100), client_name, font=fs, fill=dark)
+        draw.line([(80, H-120), (300, H-120)], fill=line_color, width=2)
+        draw.text((80, H-100), client_name, font=fs, fill=text_color)
 
         url = upload_to_supabase(
             canvas,
@@ -380,6 +398,20 @@ def story_template():
     except Exception as e:
         print(f"❌ Erreur story template: {e}")
         return jsonify({ 'success': False, 'error': str(e) }), 500
+
+
+def _make_color_canvas(W, H, primary):
+    """Crée un canvas avec fond dégradé de couleur"""
+    canvas = Image.new('RGB', (W, H), primary)
+    draw   = ImageDraw.Draw(canvas)
+    for y in range(H):
+        ratio = y / H
+        r = int(primary[0] * (1 - ratio * 0.3))
+        g = int(primary[1] * (1 - ratio * 0.3))
+        b = int(primary[2] * (1 - ratio * 0.3))
+        draw.line([(0, y), (W, y)], fill=(r, g, b))
+    return canvas
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENDPOINT PRINCIPAL — POST /assemble
@@ -432,10 +464,12 @@ def assemble():
         print(f"❌ Erreur assembleur: {e}")
         return jsonify({ 'success': False, 'error': str(e) }), 500
 
+
 # ── Health check ──────────────────────────────────────────────────────────────
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({ 'status': 'ok' })
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
