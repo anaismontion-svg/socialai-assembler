@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Télécharger Poppins et Lora
+# Télécharger Poppins et Lora v3
 RUN mkdir -p /app/fonts && \
     wget -q "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Light.ttf" -O /app/fonts/Poppins-Light.ttf || true && \
     wget -q "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Regular.ttf" -O /app/fonts/Poppins-Regular.ttf || true && \
